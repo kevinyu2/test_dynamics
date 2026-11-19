@@ -140,7 +140,13 @@ def run_stvcr(support_adata, target_time, run_dir, time_key="time", spatial_key=
               label_key="Annotation", colors=None, min_genes=100, min_cells=3, n_top_genes=2000,
               n_epochs=2001, num_samples=1000, z_dims=10, ae_epochs=1000, use_initial_alignment=True,
               delta_t=0.1, time_unit="day", seed=19491001):
-    """Prepare, train and interpolate in one call. The label column comes back named `label_key`."""
+    """
+    Prepare, train and interpolate in one call. The label column comes back named `label_key`.
+
+    A target AFTER the last support timepoint (forward extrapolation) needs no special handling: stVCR
+    evolves the latest observed slice forward until the target time.
+    Backward extrapolation is not supported.
+    """
     data = prepare_stvcr_data(support_adata, time_key, spatial_key, label_key, colors,
                               min_genes, min_cells, n_top_genes)
     model = train_stvcr_model(data, run_dir, spatial_key, n_epochs, num_samples, z_dims, ae_epochs,

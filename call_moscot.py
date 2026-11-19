@@ -10,8 +10,9 @@ How the interpolation works (see the notebook / the maths write-up):
      N = n_src^(1-lam) * n_tgt^lam  with  lam = (t - t_src) / (t_tgt - t_src).
   3. Draw N parents with probability proportional to g_i^lam; for each, draw a partner from that
      parent's row of P; place the new cell at (1-lam)*parent + lam*partner (space, expression, PCA).
-  4. moscot has no classifier, so cell types are assigned by k-nearest-neighbours in PCA space,
-     trained on the two observed slices. The labels of the two parent cells are kept as well.
+  4. Cell types: moscot has no classifier, so a new cell takes the label of the nearer of its two source
+     cells, i.e. the partner when lam > 0.5 (this includes forward extrapolation) and the parent otherwise.
+     The labels of both source cells are kept as well (parent_label, partner_label).
 """
 import numpy as np
 import pandas as pd
@@ -49,19 +50,30 @@ def train_moscot(adata, time_key="time", spatial_key="spatial", n_pca=10,
     }
 
 
-def interpolate_moscot(model, target_time, n_pred=None, jitter=0.0, k_label=15, seed=0, chunk=2000):
+def interpolate_moscot(model, target_time, n_pred=None, jitter=0.0, seed=0, chunk=2000,
+                       allow_extrapolation=False):
     """
-    Build predicted cells at `target_time` (strictly between the model's two timepoints).
+    Build predicted cells at `target_time`.
+    By default the target must lie strictly between the model's two timepoints (interpolation).
+    With allow_extrapolation=True it may lie outside them:
+      forward  (target > t_tgt): the same formulas with lam > 1, i.e. the straight line parent -> partner is
+               continued past the partner, and the cell count keeps following n_src^(1-lam) * n_tgt^lam.
+    Only forward extrapolation is supported: a target before t_src is always rejected.
     n_pred overrides the automatic cell count; jitter is the std of Gaussian noise added to positions.
     """
     import anndata as ad
-    from sklearn.neighbors import KNeighborsClassifier
 
     P, src, tgt = model["P"], model["src"], model["tgt"]
     t_src, t_tgt = model["t_src"], model["t_tgt"]
     spatial_key, label_key = model["spatial_key"], model["label_key"]
-    if not t_src < target_time < t_tgt:
-        raise ValueError(f"target {target_time} must lie between {t_src} and {t_tgt}")
+    if np.isclose(target_time, t_src) or np.isclose(target_time, t_tgt):
+        raise ValueError(f"target {target_time} coincides with an observed timepoint ({t_src}, {t_tgt})")
+    if target_time < t_src:
+        raise ValueError(f"target {target_time} is before the first timepoint {t_src}; "
+                         f"backward extrapolation is not supported")
+    if target_time > t_tgt and not allow_extrapolation:
+        raise ValueError(f"target {target_time} must lie between {t_src} and {t_tgt} "
+                         f"(pass allow_extrapolation=True to go beyond {t_tgt})")
     rng = np.random.default_rng(seed)
     n_src, n_tgt = P.shape
     lam = (target_time - t_src) / (t_tgt - t_src)
@@ -92,19 +104,20 @@ def interpolate_moscot(model, target_time, n_pred=None, jitter=0.0, k_label=15, 
     X = mix(dense(src.X)[parents], dense(tgt.X)[partners])
     pcs = mix(np.asarray(src.obsm["X_pca"])[parents], np.asarray(tgt.obsm["X_pca"])[partners])
 
-    # labels: kNN in PCA space, trained on the two observed slices
-    train_x = np.vstack([np.asarray(src.obsm["X_pca"]), np.asarray(tgt.obsm["X_pca"])])
-    train_y = np.concatenate([src.obs[label_key].astype(str).values, tgt.obs[label_key].astype(str).values])
-    knn = KNeighborsClassifier(n_neighbors=int(min(k_label, len(train_y)))).fit(train_x, train_y)
+    parent_label = src.obs[label_key].astype(str).values[parents]
+    partner_label = tgt.obs[label_key].astype(str).values[partners]
+    # the new cell sits lam of the way from parent to partner, so it inherits the nearer one's label
+    # (lam > 0.5 also covers forward extrapolation, where the partner is the nearest observed cell)
+    labels = partner_label if lam > 0.5 else parent_label
 
     pred = ad.AnnData(X=X.astype(np.float32))
     pred.var_names = list(src.var_names)
     pred.obs_names = [f"moscot_t{target_time:g}_{i}" for i in range(n_pred)]
     pred.obsm["spatial"] = xy.astype(np.float32)          # raw coordinate units, same frame as the input
     pred.obsm["X_pca"] = pcs.astype(np.float32)
-    pred.obs[label_key] = pd.Categorical(knn.predict(pcs))
-    pred.obs["parent_label"] = src.obs[label_key].astype(str).values[parents]
-    pred.obs["partner_label"] = tgt.obs[label_key].astype(str).values[partners]
+    pred.obs[label_key] = pd.Categorical(labels)
+    pred.obs["parent_label"] = parent_label
+    pred.obs["partner_label"] = partner_label
     pred.obs["parent_idx"] = parents
     pred.obs["partner_idx"] = partners
     return pred

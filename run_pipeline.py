@@ -21,6 +21,13 @@ Choosing what to run (all optional):
   --n-cells 500       random subsample per timepoint (fast tests)
   --quick             short stVCR training (epochs 201, 300 samples per step, AE 100 epochs)
 
+Extrapolation instead of interpolation:
+  --mode extrapolate  hold out a timepoint and predict it FORWARD in time from the timepoints before it
+                      (needs >= 2 earlier timepoints, e.g. 1 2 3 -> 4); there is no backward extrapolation.
+      moscot / stvcr_two use the two nearest earlier timepoints, stvcr_all uses all earlier ones,
+      and score.py's naive baseline is the single nearest observed slice. Files are named
+      <model>__fwd_t<time>.h5ad. --targets picks which times to predict (default: every valid one).
+
 Then:  python score.py --pred-dir <out>/predictions --original <same input file> --out <out>/scores
 """
 import argparse
@@ -48,6 +55,8 @@ def parse_args(argv=None):
     p.add_argument("--times", type=float, nargs="*", default=None, help="only use these observed timepoints")
     p.add_argument("--targets", type=float, nargs="*", default=None, help="only hold out / predict these")
     p.add_argument("--models", nargs="*", default=list(MODELS), choices=MODELS)
+    p.add_argument("--mode", default="interpolate", choices=["interpolate", "extrapolate"],
+                   help="interpolate: hold out inner timepoints; extrapolate: predict beyond the data")
     p.add_argument("--n-cells", type=int, default=None, help="subsample this many cells per timepoint")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--overwrite", action="store_true", help="redo predictions that already exist")
@@ -59,7 +68,6 @@ def parse_args(argv=None):
     p.add_argument("--moscot-alpha", type=float, default=0.5)
     p.add_argument("--n-pca", type=int, default=10)
     p.add_argument("--moscot-jitter", type=float, default=0.0)
-    p.add_argument("--k-label", type=int, default=15, help="neighbours for moscot cell-type labels")
     # stVCR
     p.add_argument("--stvcr-epochs", type=int, default=None, help="default 2001 (201 with --quick)")
     p.add_argument("--stvcr-num-samples", type=int, default=None, help="default 1000 (300 with --quick)")
@@ -82,15 +90,16 @@ def run_one(run, adata, args, colors, out):
     """Train one model on its support timepoints and return its raw (unfinalised) prediction + params."""
     t = np.asarray(adata.obs[args.time_key], dtype=float)
     support = adata[np.isin(t, run["support"])].copy()
-    name = common.pred_name(run["model"], run["target"])
+    name = common.pred_name(run["model"], run["target"], run.get("direction"))
+    extrapolating = run.get("mode") == "extrapolate"
     if run["model"] == "moscot":
         from call_moscot import interpolate_moscot, train_moscot
         params = dict(n_pca=args.n_pca, epsilon=args.moscot_epsilon, alpha=args.moscot_alpha, tau=args.moscot_tau,
-                      jitter=args.moscot_jitter, k_label=args.k_label, seed=args.seed)
+                      jitter=args.moscot_jitter, seed=args.seed)
         model = train_moscot(support, args.time_key, args.spatial_key, args.n_pca, args.moscot_epsilon,
                              args.moscot_alpha, args.moscot_tau, args.label_key)
-        pred = interpolate_moscot(model, run["target"], jitter=args.moscot_jitter, k_label=args.k_label,
-                                  seed=args.seed)
+        pred = interpolate_moscot(model, run["target"], jitter=args.moscot_jitter, seed=args.seed,
+                                  allow_extrapolation=extrapolating)
     else:
         from call_stvcr import run_stvcr
         params = dict(n_epochs=args.stvcr_epochs, num_samples=args.stvcr_num_samples, ae_epochs=args.ae_epochs,
@@ -117,9 +126,10 @@ def main(argv=None):
             raise KeyError(f"'{key}' not found in the input file (obs: {list(full.obs.columns)}, obsm: {list(full.obsm.keys())})")
     colors = common.label_colors(full, args.label_key)
     adata, times = common.select_times(full, args.time_key, args.times, args.n_cells, args.seed)
-    runs = common.plan_runs(times, args.targets, args.models)
+    runs = common.plan_runs(times, args.targets, args.models, mode=args.mode)
     targets = sorted({r["target"] for r in runs})
-    print(f"[pipeline] {adata.n_obs} cells, timepoints {times.tolist()}, targets {targets}, models {args.models}")
+    print(f"[pipeline] {adata.n_obs} cells, timepoints {times.tolist()}, targets {targets}, models {args.models}, "
+          f"mode {args.mode}" + (" (forward)" if args.mode == "extrapolate" else ""))
 
     with open(os.path.join(out, "config.json"), "w") as f:
         json.dump({"args": vars(args), "timepoints": times.tolist(), "targets": targets,
@@ -138,8 +148,9 @@ def main(argv=None):
         pd.DataFrame(list(merged.values())).to_csv(manifest_path, index=False)
     rows = []
     for i, run in enumerate(runs, 1):
-        name = common.pred_name(run["model"], run["target"])
+        name = common.pred_name(run["model"], run["target"], run.get("direction"))
         row = dict(model=run["model"], target_time=run["target"], support_times=" ".join(f"{x:g}" for x in run["support"]),
+                   mode=run.get("mode", "interpolate"), direction=run.get("direction") or "",
                    file=f"predictions/{name}.h5ad", image=f"images/{name}.png", status="", seconds=0.0, n_pred=0, message="")
         dst = os.path.join(out, "predictions", f"{name}.h5ad")
         print(f"\n[pipeline] ({i}/{len(runs)}) {name}: train on {run['support']} -> predict {run['target']:g}")
@@ -152,10 +163,12 @@ def main(argv=None):
         try:
             pred, params = run_one(run, adata, args, colors, out)
             pred = common.finalize_prediction(pred, model=run["model"], target=run["target"], support=run["support"],
-                                              flank=run["flank"], label_key=args.label_key, colors=colors, params=params)
+                                              flank=run["flank"], label_key=args.label_key, colors=colors, params=params,
+                                              mode=run.get("mode", "interpolate"), direction=run.get("direction"))
             pred.write_h5ad(dst)
             truth = adata[np.isclose(t_all, run["target"])]
-            title = f"{run['model']} | predict t={run['target']:g} from t={row['support_times']}"
+            how = " (forward extrapolation)" if run.get("direction") == "forward" else ""
+            title = f"{run['model']} | predict t={run['target']:g} from t={row['support_times']}{how}"
             common.plot_prediction_adata(pred, truth, os.path.join(out, row["image"]), args.label_key, colors, title)
             row.update(status="ok", n_pred=int(pred.n_obs))
         except Exception as e:                                         # keep going: one failure shouldn't lose the rest

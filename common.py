@@ -28,8 +28,12 @@ def time_tag(t):
     return f"{float(t):g}".replace(".", "p").replace("-", "m")
 
 
-def pred_name(model, target):
-    return f"{model}__t{time_tag(target)}"
+DIRECTION_TAG = {"forward": "fwd_"}
+
+
+def pred_name(model, target, direction=None):
+    """moscot__t2 for interpolation; moscot__fwd_t4 for forward extrapolation."""
+    return f"{model}__{DIRECTION_TAG.get(direction, '')}t{time_tag(target)}"
 
 
 def dense(x):
@@ -76,9 +80,12 @@ def select_times(adata, time_key, times=None, n_cells=None, seed=0):
     return adata[idx].copy(), keep
 
 
-def plan_runs(times, targets=None, models=MODELS):
+def plan_runs(times, targets=None, models=MODELS, mode="interpolate"):
     """
     Decide what to predict and from which timepoints.
+
+    mode="extrapolate" predicts timepoints OUTSIDE the data the model sees (see _plan_extrapolation).
+    The rest of this docstring describes the default, mode="interpolate".
 
     times    observed timepoints that are available (after any --times restriction)
     targets  intermediate timepoints to hold out and predict (default: every one that has an
@@ -92,6 +99,10 @@ def plan_runs(times, targets=None, models=MODELS):
     Returns a list of dicts: model, target, support, flank (+ 'skip' reason if redundant).
     """
     times = sorted(float(x) for x in times)
+    if mode == "extrapolate":
+        return _plan_extrapolation(times, targets, models)
+    if mode != "interpolate":
+        raise ValueError(f"mode must be 'interpolate' or 'extrapolate', got {mode!r}")
     if len(times) < 3:
         raise ValueError("need at least 3 timepoints: one to hold out and one on each side")
     inner = times[1:-1]
@@ -119,8 +130,52 @@ def plan_runs(times, targets=None, models=MODELS):
             right = min(t for t in times if t > tgt)
             others = [t for t in times if t != tgt]
             support = others if m == "stvcr_all" else [left, right]
-            run = dict(model=m, target=tgt, support=support, flank=[left, right])
+            run = dict(model=m, target=tgt, support=support, flank=[left, right], mode="interpolate", direction=None)
             if m == "stvcr_two" and support == others:
+                run["skip"] = "same training timepoints as stvcr_all"
+            runs.append(run)
+    return runs
+
+
+def _plan_extrapolation(times, targets, models):
+    """
+    Hold out a timepoint and predict it FORWARD in time from the timepoints before it (at least two needed).
+
+    For each target, with `side` = all timepoints before it:
+      moscot     support = the two latest timepoints of `side`
+      stvcr_two  support = the same two
+      stvcr_all  support = all of `side`
+    flank = [the single nearest earlier timepoint]: the naive baseline is "no change from the nearest slice".
+    Later timepoints are NOT used at all (that would be interpolation). There is no backward extrapolation.
+    """
+    if len(times) < 3:
+        raise ValueError("need at least 3 timepoints: one to hold out and two before it")
+    bad = [m for m in models if m not in MODELS]
+    if bad:
+        raise ValueError(f"unknown models {bad}; choose from {MODELS}")
+    valid = times[2:]                                                 # targets with >= 2 earlier timepoints
+
+    if targets is None:
+        chosen = list(valid)
+    else:
+        chosen = []
+        for want in targets:
+            hit = [t for t in times if np.isclose(t, float(want))]
+            if not hit:
+                raise ValueError(f"target {want} is not among the timepoints {times}")
+            if hit[0] not in valid:
+                raise ValueError(f"target {want:g} cannot be extrapolated forward: it needs at least two earlier "
+                                 f"timepoints (valid targets {valid})")
+            chosen.append(hit[0])
+        chosen = sorted(set(chosen))
+
+    runs = []
+    for m in models:
+        for tgt in chosen:
+            side = [t for t in times if t < tgt]
+            support = side if m == "stvcr_all" else side[-2:]
+            run = dict(model=m, target=tgt, support=support, flank=[side[-1]], mode="extrapolate", direction="forward")
+            if m == "stvcr_two" and support == side:
                 run["skip"] = "same training timepoints as stvcr_all"
             runs.append(run)
     return runs
@@ -141,7 +196,8 @@ def label_colors(adata, label_key):
     return dict(zip([str(c) for c in cats], cols))
 
 
-def finalize_prediction(pred, *, model, target, support, flank, label_key, colors, params):
+def finalize_prediction(pred, *, model, target, support, flank, label_key, colors, params,
+                        mode="interpolate", direction=None):
     """Put a model's raw output into the common on-disk format (see module docstring)."""
     cats = list(colors)
     if label_key in pred.obs:
@@ -152,6 +208,8 @@ def finalize_prediction(pred, *, model, target, support, flank, label_key, color
     pred.uns["interp_support_times"] = np.asarray(support, dtype=float)
     pred.uns["interp_flank_times"] = np.asarray(flank, dtype=float)
     pred.uns["interp_label_key"] = str(label_key)
+    pred.uns["interp_mode"] = str(mode)                                  # "interpolate" or "extrapolate"
+    pred.uns["interp_direction"] = str(direction or "")                  # "" or "forward"
     pred.uns["interp_params_json"] = json.dumps(params, default=_jsonable)
     pred.obs["time"] = float(target)
     return pred
