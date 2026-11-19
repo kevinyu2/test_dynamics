@@ -21,7 +21,11 @@ Choosing what to run (all optional):
   --n-cells 500       random subsample per timepoint (fast tests)
   --quick             short stVCR training (epochs 201, 300 samples per step, AE 100 epochs)
 
-Extrapolation instead of interpolation:
+What to predict (--mode, default both):
+  --mode both         interpolation AND forward extrapolation (default). A target is used for every mode it is
+                      valid for: with times 1..4 and --targets 3 4, 3 is interpolated and extrapolated, 4 only
+                      extrapolated. Interpolation files are <model>__t<time>, extrapolation <model>__fwd_t<time>.
+  --mode interpolate  only the interpolation runs described above
   --mode extrapolate  hold out a timepoint and predict it FORWARD in time from the timepoints before it
                       (needs >= 2 earlier timepoints, e.g. 1 2 3 -> 4); there is no backward extrapolation.
       moscot / stvcr_two use the two nearest earlier timepoints, stvcr_all uses all earlier ones,
@@ -55,8 +59,9 @@ def parse_args(argv=None):
     p.add_argument("--times", type=float, nargs="*", default=None, help="only use these observed timepoints")
     p.add_argument("--targets", type=float, nargs="*", default=None, help="only hold out / predict these")
     p.add_argument("--models", nargs="*", default=list(MODELS), choices=MODELS)
-    p.add_argument("--mode", default="interpolate", choices=["interpolate", "extrapolate"],
-                   help="interpolate: hold out inner timepoints; extrapolate: predict beyond the data")
+    p.add_argument("--mode", default="both", choices=["both", "interpolate", "extrapolate"],
+                   help="both (default): interpolation and forward extrapolation; interpolate: hold out inner "
+                        "timepoints; extrapolate: predict beyond the data")
     p.add_argument("--n-cells", type=int, default=None, help="subsample this many cells per timepoint")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--overwrite", action="store_true", help="redo predictions that already exist")
@@ -130,6 +135,9 @@ def main(argv=None):
     targets = sorted({r["target"] for r in runs})
     print(f"[pipeline] {adata.n_obs} cells, timepoints {times.tolist()}, targets {targets}, models {args.models}, "
           f"mode {args.mode}" + (" (forward)" if args.mode == "extrapolate" else ""))
+    if args.mode == "both":
+        print(f"[pipeline] {sum('skip' not in r and r['mode'] == 'interpolate' for r in runs)} interpolation + "
+              f"{sum('skip' not in r and r['mode'] == 'extrapolate' for r in runs)} extrapolation runs")
 
     with open(os.path.join(out, "config.json"), "w") as f:
         json.dump({"args": vars(args), "timepoints": times.tolist(), "targets": targets,

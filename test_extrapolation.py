@@ -34,7 +34,7 @@ def test_names_mark_forward_extrapolation_and_keep_interpolation_unchanged():
 
 
 def test_interpolation_plan_is_unchanged():
-    runs = common.plan_runs([1, 2, 3, 4])
+    runs = common.plan_runs([1, 2, 3, 4], mode="interpolate")
     assert {r["target"] for r in runs} == {2.0, 3.0}
     assert all(r["mode"] == "interpolate" and r["direction"] is None for r in runs)
     r = by_key(runs)[("moscot", None, 2.0)]
@@ -238,7 +238,8 @@ def test_pipeline_targets_flag(stubbed):
 
 def test_interpolation_mode_still_default(stubbed):
     data, full, calls, tmp = stubbed
-    run_pipeline.main(["--input", data, "--out", str(tmp / "oi"), "--models", "moscot", "--targets", "3"])
+    run_pipeline.main(["--input", data, "--out", str(tmp / "oi"), "--models", "moscot", "--targets", "3",
+                       "--mode", "interpolate"])
     assert os.listdir(tmp / "oi" / "predictions") == ["moscot__t3.h5ad"]
     p = ad.read_h5ad(tmp / "oi" / "predictions" / "moscot__t3.h5ad")
     assert str(p.uns["interp_mode"]) == "interpolate" and str(p.uns["interp_direction"]) == ""
@@ -302,7 +303,7 @@ def test_parallel_dry_run_lists_one_job_per_run(stubbed, capsys):
     assert "--models stvcr_all" in one and "--targets 4" in one and "--mode extrapolate" in one
     assert all("--direction" not in l for l in lines)
     # interpolation jobs carry no direction and keep their old names
-    run_parallel.main(["--input", data, "--out", str(tmp / "par2"), "--dry-run"])
+    run_parallel.main(["--input", data, "--out", str(tmp / "par2"), "--mode", "interpolate", "--dry-run"])
     inter = [l for l in capsys.readouterr().out.splitlines() if "run_pipeline.py" in l]
     assert inter and all("--direction" not in l and "--mode interpolate" in l for l in inter)
     assert any("moscot__t2 " in l or "/moscot__t2 " in l for l in inter)
@@ -317,3 +318,54 @@ def test_toy_extrapolation_script_plans_forward_3_and_4(capsys):
     lines = [l for l in capsys.readouterr().out.splitlines() if "run_pipeline.py" in l]
     got = sorted(l.split("--models ")[1].split()[0] + "@" + l.split("--targets ")[1].split()[0] for l in lines)
     assert got == ["moscot@3", "moscot@4", "stvcr_all@3", "stvcr_all@4", "stvcr_two@4"]
+
+
+# ------------------------------------------------------------------------------------------------ mode both (default)
+def test_default_mode_is_both_and_plans_interpolation_then_extrapolation():
+    runs = common.plan_runs([1, 2, 3, 4, 5])
+    modes = [r["mode"] for r in runs]
+    assert modes == sorted(modes, key=lambda m: m != "interpolate")                  # all interpolation runs first
+    interp = {(r["model"], r["target"]) for r in runs if r["mode"] == "interpolate"}
+    extrap = {(r["model"], r["target"]) for r in runs if r["mode"] == "extrapolate"}
+    assert {t for _, t in interp} == {2.0, 3.0, 4.0} and {t for _, t in extrap} == {3.0, 4.0, 5.0}
+    assert runs == common.plan_runs([1, 2, 3, 4, 5], mode="both")
+    assert [r for r in runs if r["mode"] == "interpolate"] == common.plan_runs([1, 2, 3, 4, 5], mode="interpolate")
+    assert [r for r in runs if r["mode"] == "extrapolate"] == common.plan_runs([1, 2, 3, 4, 5], mode="extrapolate")
+    names = [common.pred_name(r["model"], r["target"], r["direction"]) for r in runs]
+    assert len(names) == len(set(names))                                              # file names never clash
+
+
+def test_both_targets_are_used_for_every_mode_they_are_valid_for():
+    runs = common.plan_runs([1, 2, 3, 4], targets=[3, 4])
+    got = {(r["mode"], r["target"]) for r in runs}
+    assert got == {("interpolate", 3.0), ("extrapolate", 3.0), ("extrapolate", 4.0)}   # 4 is the last: no interpolation
+    assert {(r["mode"], r["target"]) for r in common.plan_runs([1, 2, 3, 4], targets=[2])} == {("interpolate", 2.0)}
+    for bad in ([1], [2.5]):                                                           # first timepoint / not a timepoint
+        with pytest.raises(ValueError):
+            common.plan_runs([1, 2, 3, 4], targets=bad)
+    with pytest.raises(ValueError):
+        common.plan_runs([1, 2])
+
+
+def test_pipeline_defaults_to_both_and_scores_have_both_tasks(stubbed):
+    data, full, calls, tmp = stubbed
+    out = tmp / "ob"
+    run_pipeline.main(["--input", data, "--out", str(out), "--models", "moscot"])
+    names = sorted(os.listdir(out / "predictions"))
+    assert names == ["moscot__fwd_t3.h5ad", "moscot__fwd_t4.h5ad", "moscot__fwd_t5.h5ad",
+                     "moscot__t2.h5ad", "moscot__t3.h5ad", "moscot__t4.h5ad"]
+    sc = tmp / "sb"
+    score.main(["--pred-dir", str(out / "predictions"), "--original", data, "--out", str(sc),
+                "--n-max", "100", "--n-repeats", "1"])
+    long = pd.read_csv(sc / "scores_long.csv")
+    assert set(long.task) == {"interp", "extrap_fwd"}
+    assert {"interp_t3", "extrap_fwd_t3"} <= {f"{t}_t{g:g}" for t, g in zip(long.task, long.target_time)}
+
+
+def test_parallel_default_mode_both_job_count(stubbed, capsys):
+    data, full, calls, tmp = stubbed
+    run_parallel.main(["--input", data, "--out", str(tmp / "pb"), "--dry-run"])
+    lines = [l for l in capsys.readouterr().out.splitlines() if "run_pipeline.py" in l]
+    # 5 timepoints: interpolation 3 targets x 3 models = 9; extrapolation 3 targets x 2 models + stvcr_two at 4, 5 = 8
+    assert len(lines) == 9 + 8
+    assert sum("--mode interpolate" in l for l in lines) == 9 and sum("--mode extrapolate" in l for l in lines) == 8

@@ -15,7 +15,8 @@ Usage (everything unknown to this script is passed straight to run_pipeline.py):
     python run_parallel.py --input toy_all.h5ad --out out --gpus 0 1 2 3 --quick
     python run_parallel.py --input data.h5ad --out out --workers 8            # CPU only
     python run_parallel.py --input data.h5ad --out out --gpus 0 --jobs-per-gpu 3 --models stvcr_all
-    python run_parallel.py --input data.h5ad --out out_extrap --mode extrapolate
+    python run_parallel.py --input data.h5ad --out out_extrap --mode extrapolate    # default --mode is both
+    python run_parallel.py --input data.h5ad --out out_interp --mode interpolate    # interpolation only
 
 Re-running is safe: finished predictions are skipped (add --overwrite to redo them).
 Then:  python score.py --pred-dir <out>/predictions --original <input> --out <out>/scores
@@ -46,7 +47,7 @@ def parse_args(argv=None):
     p.add_argument("--times", type=float, nargs="*", default=None)
     p.add_argument("--targets", type=float, nargs="*", default=None)
     p.add_argument("--models", nargs="*", default=list(MODELS), choices=MODELS)
-    p.add_argument("--mode", default="interpolate", choices=["interpolate", "extrapolate"])
+    p.add_argument("--mode", default="both", choices=["both", "interpolate", "extrapolate"])
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--gpus", nargs="*", default=None, help="GPU ids to use, e.g. --gpus 0 1 2 3 (default: no GPU pinning)")
     p.add_argument("--jobs-per-gpu", type=int, default=1, help="concurrent jobs on each listed GPU")

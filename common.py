@@ -80,12 +80,13 @@ def select_times(adata, time_key, times=None, n_cells=None, seed=0):
     return adata[idx].copy(), keep
 
 
-def plan_runs(times, targets=None, models=MODELS, mode="interpolate"):
+def plan_runs(times, targets=None, models=MODELS, mode="both"):
     """
     Decide what to predict and from which timepoints.
 
+    mode="both" (default) plans the interpolation runs and then the forward-extrapolation runs (see _plan_both).
     mode="extrapolate" predicts timepoints OUTSIDE the data the model sees (see _plan_extrapolation).
-    The rest of this docstring describes the default, mode="interpolate".
+    The rest of this docstring describes mode="interpolate".
 
     times    observed timepoints that are available (after any --times restriction)
     targets  intermediate timepoints to hold out and predict (default: every one that has an
@@ -99,10 +100,12 @@ def plan_runs(times, targets=None, models=MODELS, mode="interpolate"):
     Returns a list of dicts: model, target, support, flank (+ 'skip' reason if redundant).
     """
     times = sorted(float(x) for x in times)
+    if mode == "both":
+        return _plan_both(times, targets, models)
     if mode == "extrapolate":
         return _plan_extrapolation(times, targets, models)
     if mode != "interpolate":
-        raise ValueError(f"mode must be 'interpolate' or 'extrapolate', got {mode!r}")
+        raise ValueError(f"mode must be 'both', 'interpolate' or 'extrapolate', got {mode!r}")
     if len(times) < 3:
         raise ValueError("need at least 3 timepoints: one to hold out and one on each side")
     inner = times[1:-1]
@@ -134,6 +137,41 @@ def plan_runs(times, targets=None, models=MODELS, mode="interpolate"):
             if m == "stvcr_two" and support == others:
                 run["skip"] = "same training timepoints as stvcr_all"
             runs.append(run)
+    return runs
+
+
+def _plan_both(times, targets, models):
+    """
+    Interpolation runs first, then forward-extrapolation runs.
+
+    Without `targets`: every interpolatable timepoint (all but the first and last) and every extrapolatable one
+    (all but the first two). With `targets`: each target is used for every mode it is valid for, and it is an
+    error only if it is valid for neither (e.g. the first timepoint) or is not a timepoint at all. So with
+    times 1..4 and --targets 3 4, timepoint 3 is both interpolated and extrapolated, 4 only extrapolated.
+    """
+    if len(times) < 3:
+        raise ValueError("need at least 3 timepoints: one to hold out and one or two around it")
+    interp_ok, extrap_ok = times[1:-1], times[2:]
+    if targets is None:
+        t_int, t_ext = list(interp_ok), list(extrap_ok)
+    else:
+        t_int, t_ext = [], []
+        for want in targets:
+            hit = [t for t in times if np.isclose(t, float(want))]
+            if not hit:
+                raise ValueError(f"target {want} is not among the timepoints {times}")
+            if hit[0] not in interp_ok and hit[0] not in extrap_ok:
+                raise ValueError(f"target {want:g} can be neither interpolated nor extrapolated forward "
+                                 f"(interpolation targets {interp_ok}, extrapolation targets {extrap_ok})")
+            if hit[0] in interp_ok:
+                t_int.append(hit[0])
+            if hit[0] in extrap_ok:
+                t_ext.append(hit[0])
+    runs = []
+    if t_int:
+        runs += plan_runs(times, sorted(set(t_int)), models, mode="interpolate")
+    if t_ext:
+        runs += plan_runs(times, sorted(set(t_ext)), models, mode="extrapolate")
     return runs
 
 

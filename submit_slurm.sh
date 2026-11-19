@@ -2,7 +2,10 @@
 # submit_slurm.sh -- one SLURM array task per (model, target), then a merge job.
 #
 #   bash submit_slurm.sh --input data.h5ad --out out [--quick --models ... --times ... any run_pipeline.py flag]
-#   bash submit_slurm.sh --input data.h5ad --out out_extrap --mode extrapolate          # extrapolation instead
+#
+# By default (--mode both) it runs interpolation AND forward extrapolation. To restrict:
+#   bash submit_slurm.sh --input data.h5ad --out out_interp --mode interpolate          # interpolation only
+#   bash submit_slurm.sh --input data.h5ad --out out_extrap --mode extrapolate          # extrapolation only
 #
 # Every array task writes only into out/jobs/<job name>/ (no shared files), so tasks can't clash.
 # Afterwards: sbatch --wrap "python score.py --pred-dir out/predictions --original data.h5ad --out out/scores"
