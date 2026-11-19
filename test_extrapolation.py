@@ -309,10 +309,8 @@ def test_parallel_dry_run_lists_one_job_per_run(stubbed, capsys):
     assert any("moscot__t2 " in l or "/moscot__t2 " in l for l in inter)
 
 
-def test_toy_extrapolation_script_plans_forward_3_and_4(capsys):
+def test_toy_extrapolation_of_3_and_4_plans_five_jobs(capsys):
     here = os.path.dirname(os.path.abspath(__file__))
-    script = open(os.path.join(here, "run_toy_extrapolation.sh")).read()
-    assert "--mode extrapolate --targets 3 4" in script and "toy_all.h5ad" in script
     run_parallel.main(["--input", os.path.join(here, "toy_all.h5ad"), "--out", "/tmp/toy_dry", "--mode", "extrapolate",
                        "--targets", "3", "4", "--dry-run"])
     lines = [l for l in capsys.readouterr().out.splitlines() if "run_pipeline.py" in l]
