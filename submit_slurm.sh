@@ -40,10 +40,17 @@ if [ -n "$MOSCOT_PYTHON" ]; then sed -E -i "s#^[^ ]+ (.*--models moscot .*)\$#$M
 if [ -n "$STVCR_PYTHON" ];  then sed -E -i "s#^[^ ]+ (.*--models stvcr_.*)\$#$STVCR_PYTHON \1#" "$JOBS"; fi
 N=$(wc -l < "$JOBS"); echo "$N jobs -> $JOBS"
 PART=${PARTITION:+--partition=$PARTITION}
+# GRES=gpu:1 (set per submission, e.g. `GRES=gpu:1 bash submit_slurm.sh ...`) gives every array task a GPU; stVCR is
+# far faster on one. Empty = CPU only: CUDA is then hidden from the jobs so stVCR cannot grab a stray, busy GPU on a
+# node that has some (that gave "CUDA error: out of memory").
+GRES=${GRES:-}
+GRES_ARG=${GRES:+--gres=$GRES}
+if [ -z "$GRES" ]; then NOGPU='export CUDA_VISIBLE_DEVICES=""'; else NOGPU=':'; fi
 
-ARR=$(sbatch --parsable $PART --array=1-$N%$MAX_CONCURRENT --cpus-per-task=$CPUS --mem=$MEM --time=$TIME \
+ARR=$(sbatch --parsable $PART $GRES_ARG --array=1-$N%$MAX_CONCURRENT --cpus-per-task=$CPUS --mem=$MEM --time=$TIME \
   --job-name=interp --output="$OUT/slurm/%A_%a.log" --wrap "
 $ACTIVATE
+$NOGPU
 export OMP_NUM_THREADS=\$SLURM_CPUS_PER_TASK MKL_NUM_THREADS=\$SLURM_CPUS_PER_TASK OPENBLAS_NUM_THREADS=\$SLURM_CPUS_PER_TASK NUMBA_NUM_THREADS=\$SLURM_CPUS_PER_TASK PYTHONNOUSERSITE=1
 cd $PWD
 eval \"\$(sed -n \"\${SLURM_ARRAY_TASK_ID}p\" $JOBS)\"

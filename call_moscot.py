@@ -20,6 +20,25 @@ import pandas as pd
 from common import dense
 
 
+def check_plan(P, converged=None, where="moscot plan"):
+    """
+    Fail with numbers instead of a bare "Probabilities contain NaN" later on. A usable plan is finite, has
+    positive total mass, and at least one source cell that sends mass somewhere. Returns summary stats.
+    """
+    P = np.asarray(P)
+    n_nan, n_inf = int(np.isnan(P).sum()), int(np.isinf(P).sum())
+    row = np.nan_to_num(P, nan=0.0, posinf=0.0, neginf=0.0).sum(axis=1)
+    stats = dict(shape=P.shape, total_mass=float(row.sum()), n_nan=n_nan, n_inf=n_inf,
+                 zero_rows=int((row <= 0).sum()), max_row=float(row.max()) if row.size else 0.0,
+                 converged=None if converged is None else bool(converged))
+    if n_nan or n_inf or not stats["total_mass"] > 0:
+        raise RuntimeError(
+            f"{where} is unusable: {stats}. NaN/inf usually means the solver diverged, and zero total mass means the "
+            f"unbalanced solution threw all mass away. Try a larger --moscot-epsilon (e.g. 0.1), --moscot-tau 1.0 "
+            f"(balanced), or a smaller --moscot-alpha, and check the two slices really overlap in the spatial frame.")
+    return stats
+
+
 def train_moscot(adata, time_key="time", spatial_key="spatial", n_pca=10,
                  epsilon=1e-2, alpha=0.5, tau=0.9, label_key="Annotation"):
     """
@@ -41,8 +60,11 @@ def train_moscot(adata, time_key="time", spatial_key="spatial", n_pca=10,
     tp = tp.solve(epsilon=epsilon, alpha=alpha, tau_a=tau, tau_b=tau)
 
     prob = tp[float(times[0]), float(times[1])]
+    P = np.asarray(prob.solution.transport_matrix)
+    stats = check_plan(P, getattr(prob.solution, "converged", None), where=f"moscot plan {times[0]:g} -> {times[1]:g}")
+    print(f"[moscot] plan {times[0]:g} -> {times[1]:g}: {stats}")
     return {
-        "P": np.asarray(prob.solution.transport_matrix),
+        "P": P,
         "src": prob.adata_src, "tgt": prob.adata_tgt,
         "t_src": float(times[0]), "t_tgt": float(times[1]),
         "spatial_key": spatial_key, "label_key": label_key,
@@ -74,6 +96,7 @@ def interpolate_moscot(model, target_time, n_pred=None, jitter=0.0, seed=0, chun
     if target_time > t_tgt and not allow_extrapolation:
         raise ValueError(f"target {target_time} must lie between {t_src} and {t_tgt} "
                          f"(pass allow_extrapolation=True to go beyond {t_tgt})")
+    check_plan(P)
     rng = np.random.default_rng(seed)
     n_src, n_tgt = P.shape
     lam = (target_time - t_src) / (t_tgt - t_src)
@@ -84,6 +107,9 @@ def interpolate_moscot(model, target_time, n_pred=None, jitter=0.0, seed=0, chun
     if n_pred is None:
         n_pred = int(round(n_src ** (1 - lam) * n_tgt ** lam))
     w = g ** lam
+    if not np.isfinite(w).all() or not w.sum() > 0:
+        raise RuntimeError(f"parent weights g^lam are not finite (lam={lam:.3g}, max growth {np.nanmax(g):.3g}); "
+                           f"the growth factors are too extreme to extrapolate this far")
     parents = rng.choice(n_src, size=n_pred, p=w / w.sum())
 
     # one partner per descendant, drawn from its parent's row of P (chunked to bound memory)

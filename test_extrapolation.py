@@ -367,3 +367,48 @@ def test_parallel_default_mode_both_job_count(stubbed, capsys):
     # 5 timepoints: interpolation 3 targets x 3 models = 9; extrapolation 3 targets x 2 models + stvcr_two at 4, 5 = 8
     assert len(lines) == 9 + 8
     assert sum("--mode interpolate" in l for l in lines) == 9 and sum("--mode extrapolate" in l for l in lines) == 8
+
+
+# ------------------------------------------------------------------------------------------------ plan checks / GPU handling
+def test_check_plan_accepts_good_plans_and_names_the_problem():
+    from call_moscot import check_plan
+    P = np.eye(5) / 5
+    P[0, 0] = 0.0                                                   # a source cell with no growth is fine
+    assert check_plan(P, converged=True)["zero_rows"] == 1
+    for bad, word in ((np.full((3, 3), np.nan), "NaN"), (np.full((3, 3), np.inf), "NaN/inf"), (np.zeros((3, 3)), "zero total mass")):
+        with pytest.raises(RuntimeError, match=word):
+            check_plan(bad)
+    m = make_model(np.eye(10) / 10, SHIFT, 10, 10)
+    m["P"] = np.full((10, 10), np.nan)
+    with pytest.raises(RuntimeError, match="unusable"):                 # instead of "Probabilities contain NaN"
+        interpolate_moscot(m, 3.0, allow_extrapolation=True)
+    m["P"] = np.zeros((10, 10))
+    with pytest.raises(RuntimeError, match="unusable"):
+        interpolate_moscot(m, 1.5)
+
+
+def sbatch_calls(tmp_path, env):
+    import stat
+    import subprocess
+    fake = tmp_path / "bin"
+    fake.mkdir(exist_ok=True)
+    sb = fake / "sbatch"
+    sb.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "$SBATCH_LOG"\nprintf -- "---\\n" >> "$SBATCH_LOG"\necho 4242\n')
+    sb.chmod(sb.stat().st_mode | stat.S_IEXEC)
+    log = tmp_path / "sbatch.log"
+    here = os.path.dirname(os.path.abspath(__file__))
+    e = {k: v for k, v in os.environ.items() if k not in ("GRES", "CUDA_VISIBLE_DEVICES")}
+    e.update(PATH=f"{fake}:{e['PATH']}", SBATCH_LOG=str(log), **env)
+    r = subprocess.run(["bash", os.path.join(here, "submit_slurm.sh"), "--input", os.path.join(here, "toy_all.h5ad"),
+                        "--out", str(tmp_path / "o"), "--models", "moscot", "--mode", "interpolate"],
+                       env=e, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return log.read_text().split("---\n")
+
+
+def test_submit_slurm_hides_gpus_unless_gres_is_set(tmp_path):
+    array, merge = sbatch_calls(tmp_path, {})[:2]
+    assert 'export CUDA_VISIBLE_DEVICES=""' in array and "--gres" not in array
+    (tmp_path / "g").mkdir()
+    array2 = sbatch_calls(tmp_path / "g", {"GRES": "gpu:1"})[0]
+    assert "--gres=gpu:1" in array2 and "CUDA_VISIBLE_DEVICES" not in array2
