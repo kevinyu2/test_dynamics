@@ -23,8 +23,8 @@ MEM=32G                 # memory per job
 TIME=24:00:00           # wall time per job (stvcr_all is the slow one)
 MAX_CONCURRENT=20       # the %N throttle on the array
 ACTIVATE=':'            # commands run at the start of every job; ':' = inherit the env you submit from
-STVCR_PYTHON=""         # e.g. /path/to/miniconda3/envs/stvcr/bin/python   (empty = use the submitting env's python)
-MOSCOT_PYTHON=""        # e.g. /path/to/miniconda3/envs/moscot/bin/python
+STVCR_PYTHON=${STVCR_PYTHON:-/n/fs/ragr-research/users/ky8418/miniconda3/envs/stvcr/bin/python}
+MOSCOT_PYTHON=${MOSCOT_PYTHON:-/n/fs/ragr-research/users/ky8418/miniconda3/envs/moscot/bin/python}
 # -----------------------------------------------------------------------------------------------
 
 eval "$ACTIVATE"
