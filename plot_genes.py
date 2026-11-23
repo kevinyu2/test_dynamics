@@ -2,11 +2,14 @@
 """
 plot_genes.py -- look at one gene's expression in the predicted slice next to the real ones.
 
-For every method (moscot / stvcr_two / stvcr_all) that has a prediction for the target, and every gene, it writes
-one PNG with the cells coloured by that gene's expression, all panels on ONE colour scale:
+For every gene it writes ONE PNG with all methods together, cells coloured by that gene's expression, every panel on
+ONE colour scale:
 
-  interpolation (two neighbours):  [ left slice | TRUE target | PREDICTED target | right slice ]
-  extrapolation (one neighbour):   [ left slice | TRUE target | PREDICTED target ]
+  row 1 (real data)   interpolation:  [ left slice | TRUE target | right slice ]
+                      extrapolation:  [ left slice | TRUE target ]
+  row 2 (predictions) [ moscot | stvcr_two | stvcr_all ]   (a method without a prediction or without the gene is left out)
+
+A grey funnel fans out from the TRUE target to every predicted panel: they all stand for that same timepoint.
 
     python plot_genes.py --original artista_2_20dpi.h5ad --pred-dir axolotl_full/predictions \
         --target 10 --neighbors 5 15 --genes SOX2 GFAP --out axolotl_full/gene_plots
@@ -23,7 +26,7 @@ Notes
     expressing cells are on top. Each title shows the mean expression, which does not depend on coordinates.
   * Each panel is centred on its own centroid (as the cell-type images are). stVCR works in an aligned frame, so its
     panel can differ from the real slice by a rotation; --no-center draws raw coordinates instead.
-  * stVCR only predicts its highly variable genes; a gene that a model did not predict is reported and skipped for it.
+  * stVCR only predicts its highly variable genes; a model that did not predict the gene is reported and left out of that plot.
 """
 import argparse
 import os
@@ -108,44 +111,82 @@ def color_range(values_list):
     return float(lo), float(hi)
 
 
-def build_figure(panels, gene, vlim, point_size=3.0, max_points=40000, center=True, cmap="viridis", seed=0, title=""):
-    """panels: list of dicts(title, xy, vals). Returns the matplotlib figure (not saved)."""
+def _prepare(p, center, max_points, rng):
+    xy = np.asarray(p["xy"], dtype=float)[:, :2]
+    v = np.asarray(p["vals"], dtype=float)
+    if center:
+        xy = xy - xy.mean(0)
+    if len(xy) > max_points:
+        keep = rng.choice(len(xy), max_points, replace=False)
+        xy, vp = xy[keep], v[keep]
+    else:
+        vp = v
+    order = np.argsort(vp, kind="stable")                              # expressing cells on top
+    return dict(title=p["title"], xy=xy[order], v=vp[order], n=len(p["xy"]), mean=float(np.mean(v)))
+
+
+def build_figure(top, predicted, gene, vlim, point_size=3.0, max_points=40000, center=True, cmap="viridis", seed=0,
+                 title="", target_label="target"):
+    """
+    Two rows on a grid of 3 columns, all panels on one colour scale.
+      top        dict(left=panel, true=panel, right=panel or None): the observed slices and the TRUE target (centre).
+      predicted  list of panels, one per method.
+    Each panel is a dict(title, xy, vals). The TRUE target sits in the middle column; a grey funnel fans out from it to
+    every predicted panel to show that they all stand for that same timepoint. Returns the figure (not saved).
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon
 
     rng = np.random.default_rng(seed)
-    prepared = []
-    for p in panels:
-        xy = np.asarray(p["xy"], dtype=float)[:, :2]
-        v = np.asarray(p["vals"], dtype=float)
-        if center:
-            xy = xy - xy.mean(0)
-        if len(xy) > max_points:
-            keep = rng.choice(len(xy), max_points, replace=False)
-            xy, v_plot = xy[keep], v[keep]
-        else:
-            v_plot = v
-        order = np.argsort(v_plot, kind="stable")                      # expressing cells on top
-        prepared.append((p["title"], xy[order], v_plot[order], len(p["xy"]), float(np.mean(v))))
-    allp = np.vstack([xy for _, xy, _, _, _ in prepared])
+    top = {k: (None if v is None else _prepare(v, center, max_points, rng)) for k, v in top.items()}
+    pred = [_prepare(p, center, max_points, rng) for p in predicted]
+    allp = np.vstack([p["xy"] for p in list(top.values()) + pred if p is not None])
     lo, hi = allp.min(0), allp.max(0)
     pad = 0.05 * (hi - lo + 1e-12)
 
-    fig, axes = plt.subplots(1, len(prepared), figsize=(4.6 * len(prepared) + 1.0, 4.8), sharex=True, sharey=True,
-                             squeeze=False)
-    sc = None
-    for ax, (name, xy, v, n, mean) in zip(axes[0], prepared):
-        sc = ax.scatter(xy[:, 0], xy[:, 1], c=v, s=point_size, linewidths=0, cmap=cmap, vmin=vlim[0], vmax=vlim[1],
-                        rasterized=True)
-        ax.set_title(f"{name}\nn={n}, mean={mean:.3g}", fontsize=10)
+    cols = {1: [1], 2: [0, 2], 3: [0, 1, 2]}
+    if not 1 <= len(pred) <= 3:
+        raise ValueError("need 1 to 3 predicted panels")
+    fig = plt.figure(figsize=(14.5, 9.5))
+    gs = fig.add_gridspec(2, 3, hspace=0.5, wspace=0.08, left=0.02, right=0.88, top=0.90, bottom=0.03)
+    place = [(top["left"], 0, 0), (top["true"], 0, 1), (top["right"], 0, 2)] + \
+            [(p, 1, c) for p, c in zip(pred, cols[len(pred)])]
+    axes, sc = {}, None
+    for p, r, c in place:
+        if p is None:
+            continue
+        ax = fig.add_subplot(gs[r, c])
+        sc = ax.scatter(p["xy"][:, 0], p["xy"][:, 1], c=p["v"], s=point_size, linewidths=0, cmap=cmap, vmin=vlim[0],
+                        vmax=vlim[1], rasterized=True)
+        ax.set_title(f"{p['title']}\nn={p['n']}, mean={p['mean']:.3g}", fontsize=11)
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlim(lo[0] - pad[0], hi[0] + pad[0])
         ax.set_ylim(lo[1] - pad[1], hi[1] + pad[1])
         ax.set_xticks([])
         ax.set_yticks([])
-    fig.colorbar(sc, ax=list(axes[0]), shrink=0.8, pad=0.02, label=gene)
-    fig.suptitle(title)
+        axes[id(p)] = ax
+        ax.apply_aspect()
+    cax = fig.add_axes([0.91, 0.25, 0.015, 0.5])
+    fig.colorbar(sc, cax=cax, label=gene)
+
+    # funnel: the bottom edge of the TRUE panel is split into one slice per method, and each slice widens into the top
+    # edge of that method's panel (same left-to-right order, so the shapes never cross)
+    t_pos = axes[id(top["true"])].get_position()
+    y_t = t_pos.y0 - 0.012
+    w = (t_pos.x1 - t_pos.x0) / len(pred)
+    for i, p in enumerate(pred):
+        q = axes[id(p)].get_position()
+        y_q = q.y1 + 0.052                                             # just above the panel's two-line title
+        x0 = t_pos.x0 + i * w
+        fig.add_artist(Polygon([(x0 + 0.004, y_t), (x0 + w - 0.004, y_t), (q.x1, y_q), (q.x0, y_q)], closed=True,
+                               transform=fig.transFigure, facecolor="#9aa0a6", alpha=0.22, edgecolor="#6b7075",
+                               linewidth=0.8, zorder=0))
+    fig.text((t_pos.x0 + t_pos.x1) / 2, (y_t + y_q) / 2 - 0.004, f"same timepoint ({target_label})", ha="center",
+             va="center", fontsize=10, color="#333333", style="italic",
+             bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.85))
+    fig.suptitle(title, fontsize=14)
     return fig
 
 
@@ -194,31 +235,33 @@ def run(a):
         def real_panel(t, label):
             return dict(title=label, xy=np.asarray(real[t].obsm[a.spatial_key]), vals=obs_vals[t])
 
+        predicted = []
         for model in a.models:
             name = common.pred_name(model, target, direction)
             path = os.path.join(a.pred_dir, name + ".h5ad")
             if not os.path.exists(path):
-                print(f"[genes] {model}: no {name}.h5ad in {a.pred_dir}, skipped")
+                print(f"[genes] {model}: no {name}.h5ad in {a.pred_dir}, left out")
                 continue
             pred = ad.read_h5ad(path)
             pg = resolve_gene(gene, list(pred.var_names))
             if pg is None:
-                print(f"[genes] {model}: '{gene}' is not among its {pred.n_vars} predicted genes, skipped")
+                print(f"[genes] {model}: '{gene}' is not among its {pred.n_vars} predicted genes, left out")
                 continue
-            panels = [real_panel(nb[0], f"t={nb[0]:g} observed"),
-                      real_panel(target, f"t={target:g} TRUE"),
-                      dict(title=f"t={target:g} PREDICTED ({model})", xy=np.asarray(pred.obsm[a.spatial_key]),
-                           vals=gene_values(pred, pg))]
-            if len(nb) == 2:
-                panels.append(real_panel(nb[1], f"t={nb[1]:g} observed"))
-            fig = build_figure(panels, gene, vlim, a.point_size, a.max_points, not a.no_center, a.cmap, a.seed,
-                               title=f"{gene}: {kind} of t={target:g} with {model}")
-            out = os.path.join(a.out, f"gene_{file_safe(gene)}__{name}.png")
-            fig.savefig(out, dpi=a.dpi, bbox_inches="tight")
-            import matplotlib.pyplot as plt
-            plt.close(fig)
-            written.append(out)
-            print(f"[genes] wrote {out}")
+            predicted.append(dict(title=f"{model} (predicted t={target:g})", xy=np.asarray(pred.obsm[a.spatial_key]),
+                                  vals=gene_values(pred, pg)))
+        if not predicted:
+            print(f"[genes] {gene}: no method has a prediction for it, no plot written")
+            continue
+        top = dict(left=real_panel(nb[0], f"t={nb[0]:g} observed"), true=real_panel(target, f"t={target:g} TRUE"),
+                   right=real_panel(nb[1], f"t={nb[1]:g} observed") if len(nb) == 2 else None)
+        fig = build_figure(top, predicted, gene, vlim, a.point_size, a.max_points, not a.no_center, a.cmap, a.seed,
+                           title=f"{gene}: {kind} of t={target:g}", target_label=f"t={target:g}")
+        out = os.path.join(a.out, f"gene_{file_safe(gene)}__{common.pred_name('all', target, direction).split('__', 1)[1]}.png")
+        fig.savefig(out, dpi=a.dpi, bbox_inches="tight")
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+        written.append(out)
+        print(f"[genes] wrote {out}")
     return written
 
 
@@ -231,7 +274,7 @@ def parse_args(argv=None):
                    help="two real timepoints around the target (interpolation) or one earlier one (extrapolation)")
     p.add_argument("--genes", nargs="+", default=None, help="gene names; a symbol like SOX2 also matches 'SOX2 | AMEX...'")
     p.add_argument("--search", default=None, help="list genes whose name contains this text (and which models predicted them), then exit")
-    p.add_argument("--models", nargs="+", default=list(common.MODELS), choices=list(common.MODELS))
+    p.add_argument("--models", nargs="+", default=["moscot", "stvcr_two", "stvcr_all"], choices=list(common.MODELS))
     p.add_argument("--out", default="gene_plots")
     p.add_argument("--time-key", default="time")
     p.add_argument("--spatial-key", default="spatial")

@@ -59,26 +59,48 @@ def spy(monkeypatch):
     return figs
 
 
-def test_interpolation_four_panels_one_file_per_method_and_gene(setup, spy, capsys):
+def test_interpolation_one_file_per_gene_with_all_methods(setup, spy, capsys):
     orig, pred_dir, tmp = setup
     make_pred(pred_dir, "moscot", 3.0)
-    make_pred(pred_dir, "stvcr_all", 3.0)                           # stvcr_two missing -> skipped with a message
+    make_pred(pred_dir, "stvcr_all", 3.0)                           # stvcr_two missing -> left out with a message
     written = plot_genes.run(args(orig, pred_dir, tmp / "out", 3, [2, 4], ["Sox2", "Gfap"]))
-    names = sorted(p.split("/")[-1] for p in written)
-    assert names == ["gene_Gfap__moscot__t3.png", "gene_Gfap__stvcr_all__t3.png",
-                     "gene_Sox2__moscot__t3.png", "gene_Sox2__stvcr_all__t3.png"]
-    assert all((tmp / "out" / n).stat().st_size > 1000 for n in names)
+    assert sorted(p.split("/")[-1] for p in written) == ["gene_Gfap__t3.png", "gene_Sox2__t3.png"]
+    assert all((tmp / "out" / n).stat().st_size > 1000 for n in ("gene_Gfap__t3.png", "gene_Sox2__t3.png"))
     assert "stvcr_two: no stvcr_two__t3.h5ad" in capsys.readouterr().out
-    assert all(len(f.axes) == 4 + 1 for f in spy)                   # left, true, predicted, right + colour bar
+    for f in spy:
+        titles = [ax.get_title().split("\n")[0] for ax in f.axes[:-1]]
+        assert titles == ["t=2 observed", "t=3 TRUE", "t=4 observed",
+                          "moscot (predicted t=3)", "stvcr_all (predicted t=3)"]       # row 1 real, row 2 methods
+        assert len(f.axes) == 5 + 1                                                    # + colour bar
 
 
-def test_extrapolation_three_panels_reads_fwd_files(setup, spy):
+def test_extrapolation_has_no_right_panel_and_reads_fwd_files(setup, spy):
     orig, pred_dir, tmp = setup
     make_pred(pred_dir, "moscot", 4.0, "forward")
     make_pred(pred_dir, "moscot", 4.0)                              # an interpolation file must NOT be used
     written = plot_genes.run(args(orig, pred_dir, tmp / "out", 4, [3], ["Sox2"], "--models", "moscot"))
-    assert [p.split("/")[-1] for p in written] == ["gene_Sox2__moscot__fwd_t4.png"]
-    assert len(spy[0].axes) == 3 + 1
+    assert [p.split("/")[-1] for p in written] == ["gene_Sox2__fwd_t4.png"]
+    assert [ax.get_title().split("\n")[0] for ax in spy[0].axes[:-1]] == ["t=3 observed", "t=4 TRUE",
+                                                                         "moscot (predicted t=4)"]
+
+
+def test_funnel_connects_true_slice_to_every_method(setup, spy):
+    from matplotlib.patches import Polygon
+    orig, pred_dir, tmp = setup
+    for m in common.MODELS:
+        make_pred(pred_dir, m, 3.0)
+    plot_genes.run(args(orig, pred_dir, tmp / "out", 3, [2, 4], ["Sox2"]))
+    fig = spy[0]
+    funnels = [p for p in fig.artists if isinstance(p, Polygon)] + [p for p in fig.patches if isinstance(p, Polygon)]
+    assert len(funnels) == 3
+    true_ax = fig.axes[1]
+    pred_axes = fig.axes[3:6]
+    for poly, ax in zip(funnels, pred_axes):                       # narrow end under the TRUE panel, wide end over a method
+        xy = poly.get_xy()
+        assert xy[:, 1].max() <= true_ax.get_position().y0 and xy[:, 1].min() >= ax.get_position().y1 - 1e-9
+        assert xy[0, 0] >= true_ax.get_position().x0 and xy[1, 0] <= true_ax.get_position().x1
+    xs = [p.get_xy()[0, 0] for p in funnels]
+    assert xs == sorted(xs)                                         # same left-to-right order at both ends: no crossing
 
 
 def test_all_panels_share_one_colour_scale_taken_from_real_slices(setup, spy):
@@ -86,7 +108,7 @@ def test_all_panels_share_one_colour_scale_taken_from_real_slices(setup, spy):
     make_pred(pred_dir, "moscot", 3.0)
     plot_genes.run(args(orig, pred_dir, tmp / "out", 3, [2, 4], ["Sox2"], "--models", "moscot"))
     fig = spy[0]
-    clims = {tuple(np.round(ax.collections[0].get_clim(), 9)) for ax in fig.axes[:4]}
+    clims = {tuple(np.round(ax.collections[0].get_clim(), 9)) for ax in fig.axes[:-1]}
     assert len(clims) == 1
     real = ad.read_h5ad(orig)
     pool = np.concatenate([real[np.isclose(real.obs["time"], t)][:, "Sox2"].X.ravel() for t in (2.0, 3.0, 4.0)])
@@ -98,7 +120,7 @@ def test_points_sorted_low_to_high_and_downsampled(setup, spy):
     orig, pred_dir, tmp = setup
     make_pred(pred_dir, "moscot", 3.0)
     plot_genes.run(args(orig, pred_dir, tmp / "out", 3, [2, 4], ["Sox2"], "--models", "moscot", "--max-points", "30"))
-    for ax in spy[0].axes[:4]:
+    for ax in spy[0].axes[:-1]:
         v = np.asarray(ax.collections[0].get_array())
         assert len(v) == 30 and np.all(np.diff(v) >= 0)
 
@@ -108,12 +130,19 @@ def test_gene_resolution_missing_genes_and_models_without_the_gene(setup, capsys
     make_pred(pred_dir, "moscot", 3.0)
     make_pred(pred_dir, "stvcr_all", 3.0, genes=["Actb"])           # like stVCR: only some genes were predicted
     written = plot_genes.run(args(orig, pred_dir, tmp / "out", 3, [2, 4], ["sox2"]))   # case-insensitive
-    assert [p.split("/")[-1] for p in written] == ["gene_Sox2__moscot__t3.png"]
+    assert [p.split("/")[-1] for p in written] == ["gene_Sox2__t3.png"]
     assert "'Sox2' is not among its 1 predicted genes" in capsys.readouterr().out
     with pytest.raises(ValueError, match="similar names.*Sox2"):
         plot_genes.run(args(orig, pred_dir, tmp / "out", 3, [2, 4], ["Sox"]))
     with pytest.raises(ValueError, match="not found"):
         plot_genes.run(args(orig, pred_dir, tmp / "out", 3, [2, 4], ["Nope"]))
+
+
+def test_no_plot_when_no_method_has_the_gene(setup, capsys):
+    orig, pred_dir, tmp = setup
+    make_pred(pred_dir, "stvcr_all", 3.0, genes=["Actb"])
+    assert plot_genes.run(args(orig, pred_dir, tmp / "out", 3, [2, 4], ["Sox2"])) == []
+    assert "no plot written" in capsys.readouterr().out
 
 
 def test_time_validation(setup):
@@ -152,7 +181,7 @@ def test_artista_style_names_symbols_search_and_safe_file_names(tmp_path, capsys
     make_pred(pdir, "moscot", 3.0, genes=["SOX2 | AMEX1", "GFAP | AMEX2", "ACTB | AMEX3"])
     make_pred(pdir, "stvcr_all", 3.0, genes=["ACTB | AMEX3"])
     written = plot_genes.run(args(str(orig), pdir, tmp_path / "out", 3, [2, 4], ["SOX2"], "--models", "moscot"))
-    assert [w.split("/")[-1] for w in written] == ["gene_SOX2_AMEX1__moscot__t3.png"]
+    assert [w.split("/")[-1] for w in written] == ["gene_SOX2_AMEX1__t3.png"]
     plot_genes.main(["--original", str(orig), "--pred-dir", str(pdir), "--target", "3", "--search", "actb"])
     out = capsys.readouterr().out
     assert "1 genes contain 'actb'" in out and "ACTB | AMEX3   [moscot, stvcr_all]" in out
