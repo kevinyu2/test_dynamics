@@ -130,3 +130,31 @@ def test_time_validation(setup):
 def test_constant_gene_does_not_crash():
     lo, hi = plot_genes.color_range([np.zeros(10), np.zeros(5)])
     assert hi > lo
+
+
+def test_artista_style_names_symbols_search_and_safe_file_names(tmp_path, capsys):
+    names = ["SOX2 | AMEX60DD001640", "SOX3[nr]|SOX2[hs] | AMEX60DD037395", "GFAP | AMEX1", "GFAP | AMEX2"]
+    assert plot_genes.resolve_gene("SOX2", names) == "SOX2 | AMEX60DD001640"       # not the alias SOX3|SOX2 entry
+    assert plot_genes.resolve_gene("sox2", names) == "SOX2 | AMEX60DD001640"
+    assert plot_genes.resolve_gene("GFAP | AMEX2", names) == "GFAP | AMEX2"
+    assert plot_genes.resolve_gene("OTHER", names) is None
+    with pytest.raises(ValueError, match="several genes.*AMEX1.*AMEX2"):
+        plot_genes.resolve_gene("GFAP", names)
+    assert plot_genes.file_safe("SOX2 | AMEX60DD001640") == "SOX2_AMEX60DD001640"
+
+    orig = tmp_path / "o.h5ad"
+    make_original(orig)
+    a = ad.read_h5ad(orig)
+    a.var_names = ["SOX2 | AMEX1", "GFAP | AMEX2", "ACTB | AMEX3"]
+    a.write_h5ad(orig)
+    pdir = tmp_path / "p"
+    pdir.mkdir()
+    make_pred(pdir, "moscot", 3.0, genes=["SOX2 | AMEX1", "GFAP | AMEX2", "ACTB | AMEX3"])
+    make_pred(pdir, "stvcr_all", 3.0, genes=["ACTB | AMEX3"])
+    written = plot_genes.run(args(str(orig), pdir, tmp_path / "out", 3, [2, 4], ["SOX2"], "--models", "moscot"))
+    assert [w.split("/")[-1] for w in written] == ["gene_SOX2_AMEX1__moscot__t3.png"]
+    plot_genes.main(["--original", str(orig), "--pred-dir", str(pdir), "--target", "3", "--search", "actb"])
+    out = capsys.readouterr().out
+    assert "1 genes contain 'actb'" in out and "ACTB | AMEX3   [moscot, stvcr_all]" in out
+    plot_genes.main(["--original", str(orig), "--pred-dir", str(pdir), "--target", "3", "--search", "sox"])
+    assert "SOX2 | AMEX1   [moscot]" in capsys.readouterr().out

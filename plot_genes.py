@@ -9,7 +9,8 @@ one PNG with the cells coloured by that gene's expression, all panels on ONE col
   extrapolation (one neighbour):   [ left slice | TRUE target | PREDICTED target ]
 
     python plot_genes.py --original artista_2_20dpi.h5ad --pred-dir axolotl_full/predictions \
-        --target 10 --neighbors 5 15 --genes Sox2 Gfap --out axolotl_full/gene_plots
+        --target 10 --neighbors 5 15 --genes SOX2 GFAP --out axolotl_full/gene_plots
+    python plot_genes.py --original artista_2_20dpi.h5ad --pred-dir axolotl_full/predictions --target 10 --search GFAP   # look names up
     python plot_genes.py --original artista_2_20dpi.h5ad --pred-dir axolotl_full/predictions \
         --target 20 --neighbors 15 --genes Sox2                      # one neighbour = forward extrapolation
 
@@ -26,6 +27,7 @@ Notes
 """
 import argparse
 import os
+import re
 import sys
 
 import numpy as np
@@ -33,13 +35,31 @@ import numpy as np
 import common
 
 
+def symbol(name):
+    """'SOX2 | AMEX60DD001640' -> 'SOX2' (the part before ' | '; names without one are returned unchanged)."""
+    return str(name).split(" | ")[0].strip()
+
+
 def resolve_gene(name, var_names):
-    """Exact match, else case-insensitive. Returns the name as spelled in var_names or None."""
+    """
+    Returns the name as spelled in var_names, or None. Tries, in order: exact, case-insensitive, and the symbol before
+    ' | ' (ARTISTA names look like 'SOX2 | AMEX60DD001640', so 'SOX2' works). A symbol shared by several genes
+    raises ValueError listing them, so you can pass the full name of the one you want.
+    """
     names = list(var_names)
     if name in set(names):
         return name
     low = {n.lower(): n for n in names}
-    return low.get(name.lower())
+    if name.lower() in low:
+        return low[name.lower()]
+    hits = [n for n in names if symbol(n).lower() == name.lower()]
+    if len(hits) > 1:
+        raise ValueError(f"'{name}' matches several genes, give the full name of one: {hits}")
+    return hits[0] if hits else None
+
+
+def file_safe(gene):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(gene)).strip("_")
 
 
 def suggest(name, var_names, k=8):
@@ -129,10 +149,33 @@ def build_figure(panels, gene, vlim, point_size=3.0, max_points=40000, center=Tr
     return fig
 
 
+def search(a):
+    """--search TEXT: list genes of the original whose name contains TEXT, and which models predicted them."""
+    import anndata as ad
+    names = list(ad.read_h5ad(a.original, backed="r").var_names)
+    hits = [n for n in names if a.search.lower() in n.lower()]
+    pred_genes = {}
+    for model in a.models:
+        for direction in (None, "forward"):
+            p = os.path.join(a.pred_dir, common.pred_name(model, a.target, direction) + ".h5ad")
+            if os.path.exists(p):
+                pred_genes[model] = set(ad.read_h5ad(p, backed="r").var_names)
+                break
+    print(f"{len(hits)} genes contain '{a.search}'" + (f" (showing 50)" if len(hits) > 50 else "") +
+          f"; predicted by: {', '.join(pred_genes) or 'no prediction file found'}")
+    for n in hits[:50]:
+        print(f"  {n}   [" + ", ".join(m for m in pred_genes if n in pred_genes[m]) + "]")
+    return hits
+
+
 def run(a):
     import anndata as ad
+    if a.search:
+        return search(a)
+    if not a.genes:
+        raise ValueError("give --genes (or --search TEXT to look names up)")
     target = float(a.target)
-    nb = check_times(target, a.neighbors)
+    nb = check_times(target, a.neighbors or [])
     direction = None if len(nb) == 2 else "forward"
     os.makedirs(a.out, exist_ok=True)
 
@@ -170,7 +213,7 @@ def run(a):
                 panels.append(real_panel(nb[1], f"t={nb[1]:g} observed"))
             fig = build_figure(panels, gene, vlim, a.point_size, a.max_points, not a.no_center, a.cmap, a.seed,
                                title=f"{gene}: {kind} of t={target:g} with {model}")
-            out = os.path.join(a.out, f"gene_{gene}__{name}.png")
+            out = os.path.join(a.out, f"gene_{file_safe(gene)}__{name}.png")
             fig.savefig(out, dpi=a.dpi, bbox_inches="tight")
             import matplotlib.pyplot as plt
             plt.close(fig)
@@ -184,9 +227,10 @@ def parse_args(argv=None):
     p.add_argument("--original", required=True, help="h5ad with every real timepoint (as given to the pipeline)")
     p.add_argument("--pred-dir", required=True, help="the predictions/ folder of a pipeline run")
     p.add_argument("--target", type=float, required=True, help="the predicted timepoint")
-    p.add_argument("--neighbors", type=float, nargs="+", required=True,
+    p.add_argument("--neighbors", type=float, nargs="+", default=None,
                    help="two real timepoints around the target (interpolation) or one earlier one (extrapolation)")
-    p.add_argument("--genes", nargs="+", required=True)
+    p.add_argument("--genes", nargs="+", default=None, help="gene names; a symbol like SOX2 also matches 'SOX2 | AMEX...'")
+    p.add_argument("--search", default=None, help="list genes whose name contains this text (and which models predicted them), then exit")
     p.add_argument("--models", nargs="+", default=list(common.MODELS), choices=list(common.MODELS))
     p.add_argument("--out", default="gene_plots")
     p.add_argument("--time-key", default="time")
@@ -201,7 +245,10 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
-    return run(parse_args(argv))
+    a = parse_args(argv)
+    if not a.search and not a.neighbors:
+        raise SystemExit("--neighbors is required (two times to interpolate, one earlier time to extrapolate)")
+    return run(a)
 
 
 if __name__ == "__main__":
