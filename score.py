@@ -96,7 +96,7 @@ METRIC_NOTES = {"w2_expr": "expression W2", "w2_joint": "joint W2", "w2_joint_al
 
 
 TASK_ORDER = ["interp", "extrap_fwd"]
-GROUP_LABEL = {"interp": "held-out {t}", "extrap_fwd": "forward {t}"}
+GROUP_LABEL = {"interp": "HO {t}", "extrap_fwd": "FWD {t}"}
 
 
 def _bar_data(long, metric, baselines=True):
