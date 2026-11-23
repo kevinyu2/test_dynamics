@@ -28,11 +28,26 @@ MOSCOT_PYTHON=${MOSCOT_PYTHON:-/n/fs/ragr-research/users/ky8418/miniconda3/envs/
 # -----------------------------------------------------------------------------------------------
 
 eval "$ACTIVATE"
+
+# --drop-ablation T: the "which other timepoints are seen" experiment (see ablation.py). One normal submission per
+# variant, each into its own folder OUT/drop_<removed timepoints>/, with its own array job and merge job.
+if printf '%s\n' "$@" | grep -qx -- '--drop-ablation'; then
+  SELF="$PWD/$(basename "$0")"
+  VARIANTS=$(python ablation.py expand "$@")
+  while IFS=$'\t' read -r LABEL VARGS; do
+    echo "=== variant $LABEL"
+    eval "bash \"$SELF\" $VARGS" < /dev/null
+  done <<< "$VARIANTS"
+  echo "all variants submitted. When they are done:"
+  echo "  sbatch --wrap \"python ablation.py score --out <out> --original <input>\""
+  exit 0
+fi
+
 OUT=$(python - "$@" <<'PY'
 import sys; a = sys.argv[1:]; print(a[a.index("--out") + 1])
 PY
 )
-OUT=$(readlink -f "$OUT"); mkdir -p "$OUT/slurm"
+mkdir -p "$OUT"; OUT=$(readlink -f "$OUT"); mkdir -p "$OUT/slurm"
 JOBS="$OUT/slurm/jobs.txt"
 python run_parallel.py "$@" --dry-run | grep run_pipeline.py > "$JOBS"
 # each line starts with the python that planned the jobs; swap in the right env's python per model
